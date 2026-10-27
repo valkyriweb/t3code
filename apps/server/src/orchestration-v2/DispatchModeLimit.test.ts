@@ -57,6 +57,41 @@ const createThread = (threadId: ThreadId) =>
   });
 
 it.layer(layerTest)("DispatchModeLimit", (it) => {
+  it.effect("refuses a resume retry after the user raises the thread modes", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const threadId = ThreadId.make("thread:limit-resume-replay");
+      yield* createThread(threadId);
+      const resume = {
+        type: "queue.resume",
+        commandId: CommandId.make("resume-before-mode-change"),
+        threadId,
+      } as const;
+      yield* orchestrator
+        .dispatch(resume)
+        .pipe(Effect.provideService(DispatchModeLimit, supervised));
+      yield* orchestrator.dispatch({
+        type: "thread.runtime-mode.set",
+        commandId: CommandId.make("raise-resume"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const refused = yield* orchestrator
+        .dispatch(resume)
+        .pipe(Effect.provideService(DispatchModeLimit, supervised), Effect.flip);
+      assert.equal(refused._tag, "OrchestratorThreadAboveModeLimitError");
+      yield* orchestrator.dispatch({
+        type: "thread.runtime-mode.set",
+        commandId: CommandId.make("lower-resume"),
+        threadId,
+        runtimeMode: "approval-required",
+      });
+      yield* orchestrator
+        .dispatch(resume)
+        .pipe(Effect.provideService(DispatchModeLimit, supervised));
+    }),
+  );
+
   it.effect("refuses a limited command on a thread its user raised, and records nothing", () =>
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;

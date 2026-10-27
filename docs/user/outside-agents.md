@@ -53,6 +53,14 @@ Then choose what the agent may do:
   threads in every project. A thread it starts or steers cannot run with more
   permissions than the mode you chose.
 
+## Stop and resume work
+
+An outside agent can stop a thread and its delegated tasks, holding queued
+turns just as **Stop** does in the app. Resume releases the selected thread's
+held turns without sending a new message; it does not resume its delegates.
+With an empty queue, Resume starts no work. A stop is refused if the thread
+or any delegate needs more permissions than the outside agent has.
+
 ## Claude Code
 
 ```sh

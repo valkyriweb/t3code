@@ -42,6 +42,10 @@ import {
   type OrchestratorMcpThreadPullRequest,
   type OrchestratorMcpThreadInterruptInput,
   type OrchestratorMcpThreadInterruptResult,
+  type OrchestratorMcpThreadStopInput,
+  type OrchestratorMcpThreadStopResult,
+  type OrchestratorMcpThreadResumeInput,
+  type OrchestratorMcpThreadResumeResult,
   type OrchestratorMcpThreadListInput,
   type OrchestratorMcpThreadListItem,
   type OrchestratorMcpThreadListResult,
@@ -201,6 +205,14 @@ export interface OrchestratorMcpServiceShape {
     scope: McpInvocationScope,
     input: OrchestratorMcpThreadInterruptInput,
   ) => Effect.Effect<OrchestratorMcpThreadInterruptResult, OrchestratorMcpFailure>;
+  readonly stopThread: (
+    scope: McpInvocationScope,
+    input: OrchestratorMcpThreadStopInput,
+  ) => Effect.Effect<OrchestratorMcpThreadStopResult, OrchestratorMcpFailure>;
+  readonly resumeThread: (
+    scope: McpInvocationScope,
+    input: OrchestratorMcpThreadResumeInput,
+  ) => Effect.Effect<OrchestratorMcpThreadResumeResult, OrchestratorMcpFailure>;
 }
 
 export class OrchestratorMcpService extends Context.Service<
@@ -1216,6 +1228,58 @@ const make = Effect.gen(function* () {
         ? caller.parent
         : yield* loadTargetThread(threadId);
     return { ...caller, target } as const;
+  });
+
+  const assertStoppable = Effect.fn("OrchestratorMcpService.assertStoppable")(function* (
+    threadId: ThreadId,
+    limits: {
+      readonly runtimeMode: RuntimeMode;
+      readonly interactionMode: ProviderInteractionMode;
+    },
+  ): Effect.fn.Return<void, OrchestratorMcpFailure> {
+    const shell = yield* threadManagement
+      .getThreadShell(threadId)
+      .pipe(Effect.mapError(threadManagementFailure));
+    if (shell !== null && shell.deletedAt === null) {
+      yield* resolveRuntimeMode(limits.runtimeMode, shell.runtimeMode);
+      yield* resolveInteractionMode(limits.interactionMode, shell.interactionMode);
+    }
+    const { subagents } = yield* threadManagement
+      .getThreadRecords(threadId, ["subagents"])
+      .pipe(Effect.mapError(threadManagementFailure));
+    const children = new Set(
+      subagents.flatMap((task) =>
+        task.origin === "app_owned" && task.childThreadId !== null ? [task.childThreadId] : [],
+      ),
+    );
+    for (const child of children) yield* assertStoppable(child, limits);
+  });
+
+  const withinModeLimit = Effect.fn("OrchestratorMcpService.withinModeLimit")(function* <A, R>(
+    limits: {
+      readonly runtimeMode: RuntimeMode;
+      readonly interactionMode: ProviderInteractionMode;
+    },
+    effect: Effect.Effect<A, OrchestratorMcpFailure, R>,
+  ) {
+    const refused = yield* Ref.make<DispatchModeRefusal | undefined>(undefined);
+    return yield* effect.pipe(
+      Effect.provideService(DispatchModeLimit, { ...limits, refused }),
+      Effect.catch((error) =>
+        Effect.flatMap(Ref.get(refused), (refusal) =>
+          Effect.fail(
+            refusal === undefined
+              ? error
+              : failure(
+                  refusal.mode === "runtime"
+                    ? "runtime_mode_escalation_denied"
+                    : "interaction_mode_escalation_denied",
+                  `Thread ${refusal.threadId} now runs in ${refusal.runtimeMode}/${refusal.interactionMode} mode, above this caller's; its user changed it while this call ran.`,
+                ),
+          ),
+        ),
+      ),
+    );
   });
 
   /** Cross-thread writes require a live caller run; stale session credentials cannot authorize them. */
@@ -2316,32 +2380,7 @@ const make = Effect.gen(function* () {
       const current = yield* readTask(scope, input.taskId);
       const key = yield* requestKey(input.clientRequestId);
       const parentProjection = yield* loadProjection(scope.thread.threadId);
-      // Cancelling stops the child and every task under it, each a write to a
-      // thread its user may have raised above the parent's modes since it was
-      // delegated. All of them are checked before anything is stopped.
-      const assertStoppable = Effect.fn("OrchestratorMcpService.assertStoppable")(function* (
-        threadId: ThreadId,
-      ): Effect.fn.Return<void, OrchestratorMcpFailure> {
-        const shell = yield* threadManagement
-          .getThreadShell(threadId)
-          .pipe(Effect.mapError(threadManagementFailure));
-        if (shell !== null && shell.deletedAt === null) {
-          yield* resolveRuntimeMode(parentProjection.thread.runtimeMode, shell.runtimeMode);
-          yield* resolveInteractionMode(
-            parentProjection.thread.interactionMode,
-            shell.interactionMode,
-          );
-        }
-        const { subagents } = yield* threadManagement
-          .getThreadRecords(threadId, ["subagents"])
-          .pipe(Effect.mapError(threadManagementFailure));
-        for (const task of subagents) {
-          if (task.origin === "app_owned" && task.childThreadId !== null) {
-            yield* assertStoppable(task.childThreadId);
-          }
-        }
-      });
-      yield* assertStoppable(current.childThreadId);
+      yield* assertStoppable(current.childThreadId, parentProjection.thread);
       const parentTask = parentProjection.subagents.find(
         (task) => task.id === input.taskId && task.origin === "app_owned",
       );
@@ -2422,30 +2461,7 @@ const make = Effect.gen(function* () {
             .pipe(Effect.mapError(threadManagementFailure));
         }
       });
-      // Checked above; a user raising one of these threads meanwhile is
-      // caught again under that thread's lock, which leaves it running.
-      const refused = yield* Ref.make<DispatchModeRefusal | undefined>(undefined);
-      const stopWithinLimit = stopChild.pipe(
-        Effect.provideService(DispatchModeLimit, {
-          runtimeMode: parentProjection.thread.runtimeMode,
-          interactionMode: parentProjection.thread.interactionMode,
-          refused,
-        }),
-        Effect.catch((error) =>
-          Effect.flatMap(Ref.get(refused), (refusal) =>
-            Effect.fail(
-              refusal === undefined
-                ? error
-                : failure(
-                    refusal.mode === "runtime"
-                      ? "runtime_mode_escalation_denied"
-                      : "interaction_mode_escalation_denied",
-                    `Thread ${refusal.threadId} now runs in ${refusal.runtimeMode}/${refusal.interactionMode} mode, above this thread's; its user changed it while the task was being cancelled.`,
-                  ),
-            ),
-          ),
-        ),
-      );
+      const stopWithinLimit = withinModeLimit(parentProjection.thread, stopChild);
       // A follow-up that lost its child run stays running on the parent, while its
       // status here comes from the child's last run. Stop on the parent cancels that task.
       const cancelOrphan = Effect.gen(function* () {
@@ -2903,6 +2919,58 @@ const make = Effect.gen(function* () {
         timedOut: result.timedOut,
         ...(wakesCaller ? { next: ORCHESTRATOR_MCP_RUNNING_TASK_NEXT } : {}),
       } satisfies OrchestratorMcpThreadWaitResult;
+    }),
+    stopThread: Effect.fn("OrchestratorMcpService.stopThread")(function* (scope, input) {
+      const { parent, limits, target } = yield* loadScopedThread(scope, input.threadId);
+      yield* assertLiveCallerForOtherThread(scope, parent, target);
+      // Preflight every descendant before stopping any; dispatch rechecks modes under lock.
+      yield* assertStoppable(input.threadId, limits);
+      const key = yield* requestKey(input.clientRequestId);
+      const commandId = stableCommandId({ scope, requestKey: key, operation: "thread-stop" });
+      const reason = agentStopReason(input.reason);
+      yield* withinModeLimit(
+        limits,
+        Effect.gen(function* () {
+          yield* threadManagement.dispatch({
+            type: "thread.stop",
+            commandId,
+            threadId: input.threadId,
+            stopDelegatedTasks: false,
+            reason,
+          });
+          // Keep descendant dispatches within the caller's authority, outside the effect worker.
+          yield* threadManagement.stopDelegatedTasks({
+            threadId: input.threadId,
+            commandId,
+            reason,
+          });
+        }).pipe(Effect.mapError(threadManagementFailure)),
+      );
+      return {
+        threadId: input.threadId,
+        status: "stop_requested",
+      } satisfies OrchestratorMcpThreadStopResult;
+    }),
+    resumeThread: Effect.fn("OrchestratorMcpService.resumeThread")(function* (scope, input) {
+      const { parent, limits, target } = yield* loadScopedThread(scope, input.threadId);
+      yield* assertLiveCallerForOtherThread(scope, parent, target);
+      yield* resolveRuntimeMode(limits.runtimeMode, target.thread.runtimeMode);
+      yield* resolveInteractionMode(limits.interactionMode, target.thread.interactionMode);
+      const key = yield* requestKey(input.clientRequestId);
+      yield* withinModeLimit(
+        limits,
+        threadManagement
+          .dispatch({
+            type: "queue.resume",
+            commandId: stableCommandId({ scope, requestKey: key, operation: "thread-resume" }),
+            threadId: input.threadId,
+          })
+          .pipe(Effect.mapError(threadManagementFailure)),
+      );
+      return {
+        threadId: input.threadId,
+        status: "resume_requested",
+      } satisfies OrchestratorMcpThreadResumeResult;
     }),
     interruptThread: Effect.fn("OrchestratorMcpService.interruptThread")(function* (scope, input) {
       const { parent, limits, target } = yield* loadScopedThread(scope, input.threadId);

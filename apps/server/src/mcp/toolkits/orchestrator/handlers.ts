@@ -188,6 +188,24 @@ const handlers = {
         return yield* service.interruptThread(scope, input);
       }),
   ),
+  t3_thread_stop: McpToolAccess.writesThreads(
+    (input) => [input.threadId],
+    (input) =>
+      Effect.gen(function* () {
+        const scope = yield* McpInvocationContext.McpInvocationContext;
+        const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+        return yield* service.stopThread(scope, input);
+      }),
+  ),
+  t3_thread_resume: McpToolAccess.writesThreads(
+    (input) => [input.threadId],
+    (input) =>
+      Effect.gen(function* () {
+        const scope = yield* McpInvocationContext.McpInvocationContext;
+        const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+        return yield* service.resumeThread(scope, input);
+      }),
+  ),
 } satisfies McpToolAccess.Handlers<typeof OrchestratorToolkit.tools>;
 
 export const layer = McpToolAccess.toLayer(OrchestratorToolkit, handlers);

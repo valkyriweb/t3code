@@ -9,6 +9,8 @@ import {
   OrchestratorMcpDelegateTaskResult,
   OrchestratorMcpThreadInterruptResult,
   OrchestratorMcpThreadSendResult,
+  OrchestratorMcpThreadStopResult,
+  OrchestratorMcpThreadResumeResult,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -71,6 +73,8 @@ const decodeThreadInterruptResult = Schema.decodeUnknownEffect(
   OrchestratorMcpThreadInterruptResult,
 );
 const decodeThreadSendResult = Schema.decodeUnknownEffect(OrchestratorMcpThreadSendResult);
+const decodeThreadStopResult = Schema.decodeUnknownEffect(OrchestratorMcpThreadStopResult);
+const decodeThreadResumeResult = Schema.decodeUnknownEffect(OrchestratorMcpThreadResumeResult);
 
 const codexSelection = {
   instanceId: codexInstanceId,
@@ -175,7 +179,12 @@ describe("orchestrator MCP toolkit", () => {
   it.live.each([
     { label: "distinct", result: queuedFollowupResult, latestSummary: queuedFollowupResult },
     { label: "identical", result: delegatedResult, latestSummary: null },
-  ])("reports $label child results", ({ result, latestSummary }) =>
+    {
+      label: "stop and resume",
+      result: queuedFollowupResult,
+      latestSummary: queuedFollowupResult,
+    },
+  ])("reports $label child results", ({ label, result, latestSummary }) =>
     Effect.scoped(
       Effect.gen(function* () {
         const cwd = yield* checkpointWorkspace("delegated-task-status");
@@ -450,19 +459,62 @@ describe("orchestrator MCP toolkit", () => {
           });
 
           const finalSequence = yield* orchestrator.getThreadEventSequence(delegated.childThreadId);
-          const interruptCall = yield* invoke("t3_thread_interrupt", {
-            threadId: delegated.childThreadId,
-            runId: runningFollowup.runId,
-            reason: "Allow the queued replay follow-up to run.",
-            clientRequestId: "interrupt-delegated-child-replay-1",
-          });
-          const interrupt = yield* decodeThreadInterruptResult(
-            interruptCall.structuredContent,
-          ).pipe(Effect.orDie);
-          expect(interrupt).toMatchObject({
-            runId: runningFollowup.runId,
-            status: "interrupt_requested",
-          });
+          if (label === "stop and resume") {
+            const stopInput = {
+              threadId: delegated.childThreadId,
+              reason: "Allow the queued replay follow-up to run.",
+              clientRequestId: "stop-delegated-child-replay-1",
+            };
+            const stopped = yield* invoke("t3_thread_stop", stopInput);
+            const stopResult = yield* decodeThreadStopResult(stopped.structuredContent);
+            expect(stopResult.status).toBe("stop_requested");
+            const held = yield* orchestrator.getThreadProjection(delegated.childThreadId);
+            expect(held.runs.find((run) => run.id === queuedFollowup.runId)).toMatchObject({
+              status: "queued",
+              queueHeld: true,
+            });
+            const retriedStop = yield* invoke("t3_thread_stop", stopInput);
+            expect(retriedStop.structuredContent).toEqual(stopped.structuredContent);
+            const resumeInput = {
+              threadId: delegated.childThreadId,
+              clientRequestId: stopInput.clientRequestId,
+            };
+            const resumed = yield* invoke("t3_thread_resume", resumeInput);
+            const resumeResult = yield* decodeThreadResumeResult(resumed.structuredContent);
+            expect(resumeResult.status).toBe("resume_requested");
+            const retriedResume = yield* invoke("t3_thread_resume", resumeInput);
+            expect(retriedResume.structuredContent).toEqual(resumed.structuredContent);
+            const delayedStopRetry = yield* invoke("t3_thread_stop", stopInput);
+            expect(delayedStopRetry.structuredContent).toEqual(stopped.structuredContent);
+            const released = yield* orchestrator.getThreadProjection(delegated.childThreadId);
+            expect(
+              released.messages
+                .filter((message) => message.role === "user")
+                .map((message) => message.id),
+            ).toEqual(
+              held.messages
+                .filter((message) => message.role === "user")
+                .map((message) => message.id),
+            );
+            expect(released.runs.map((run) => run.id)).toEqual(held.runs.map((run) => run.id));
+            expect(released.runs.find((run) => run.id === queuedFollowup.runId)?.queueHeld).toBe(
+              false,
+            );
+          } else {
+            const interruptCall = yield* invoke("t3_thread_interrupt", {
+              threadId: delegated.childThreadId,
+              runId: runningFollowup.runId,
+              reason: "Allow the queued replay follow-up to run.",
+              clientRequestId: "interrupt-delegated-child-replay-1",
+            });
+            const interrupt = yield* decodeThreadInterruptResult(
+              interruptCall.structuredContent,
+            ).pipe(Effect.orDie);
+            expect(interrupt).toMatchObject({
+              runId: runningFollowup.runId,
+              status: "interrupt_requested",
+            });
+          }
           yield* orchestrator
             .streamStoredEventsFrom({
               threadId: delegated.childThreadId,

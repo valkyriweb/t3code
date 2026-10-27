@@ -686,62 +686,67 @@ function scheduledTask(id: string, runtimeMode: "auto" | "full-access"): never {
   } as never;
 }
 
-it.effect.each(["t3_thread_interrupt", "t3_workflow_stop"])(
-  "a caller cannot use %s on a thread that runs above its own modes",
-  (toolName) =>
-    Effect.gen(function* () {
-      const server = yield* McpServer.McpServer;
-      const result = yield* server
-        .callTool({
-          name: toolName,
-          arguments: {
-            threadId: "full-access-thread",
-            ...(toolName === "t3_workflow_stop" ? { subagentId: "workflow-coordinator" } : {}),
-          },
-        })
-        .pipe(
-          Effect.provideService(McpInvocationContext.McpInvocationContext, clientScope("auto")),
-          Effect.provideService(McpSchema.McpServerClient, client),
-        );
-      expect(declaredFailure(result)).toMatchObject({ code: "runtime_mode_escalation_denied" });
-    }).pipe(
-      Effect.provide(
-        layerOrchestratorToolkit.pipe(
-          Layer.provideMerge(McpServer.McpServer.layer),
-          Layer.provide(NodeCrypto.layer),
-          Layer.provide(
-            Layer.mock(ThreadManagement.ThreadManagementService)({
-              getThreadShell: () =>
-                Effect.succeed({
+it.effect.each(
+  ["t3_thread_interrupt", "t3_thread_stop", "t3_thread_resume", "t3_workflow_stop"].flatMap(
+    (toolName) => [
+      { toolName, access: "auto" as const, code: "runtime_mode_escalation_denied" },
+      { toolName, access: "read-only" as const, code: "capability_denied" },
+    ],
+  ),
+)("$access client cannot use $toolName on a full-access thread", ({ toolName, access, code }) =>
+  Effect.gen(function* () {
+    const server = yield* McpServer.McpServer;
+    const result = yield* server
+      .callTool({
+        name: toolName,
+        arguments: {
+          threadId: "full-access-thread",
+          ...(toolName === "t3_workflow_stop" ? { subagentId: "workflow-coordinator" } : {}),
+        },
+      })
+      .pipe(
+        Effect.provideService(McpInvocationContext.McpInvocationContext, clientScope(access)),
+        Effect.provideService(McpSchema.McpServerClient, client),
+      );
+    expect(declaredFailure(result)).toMatchObject({ code });
+  }).pipe(
+    Effect.provide(
+      layerOrchestratorToolkit.pipe(
+        Layer.provideMerge(McpServer.McpServer.layer),
+        Layer.provide(NodeCrypto.layer),
+        Layer.provide(
+          Layer.mock(ThreadManagement.ThreadManagementService)({
+            getThreadShell: () =>
+              Effect.succeed({
+                projectId: "project-a",
+                deletedAt: null,
+                runtimeMode: "full-access",
+                interactionMode: "default",
+              } as never),
+            getProjectThreadRecords: () =>
+              Effect.succeed({
+                thread: {
+                  id: ThreadId.make("full-access-thread"),
                   projectId: "project-a",
-                  deletedAt: null,
                   runtimeMode: "full-access",
                   interactionMode: "default",
-                } as never),
-              getProjectThreadRecords: () =>
-                Effect.succeed({
-                  thread: {
-                    id: ThreadId.make("full-access-thread"),
-                    projectId: "project-a",
-                    runtimeMode: "full-access",
-                    interactionMode: "default",
-                    deletedAt: null,
-                  },
-                  runs: [],
-                } as never),
-              stopWorkflow: () => Effect.die("workflow stop must not dispatch above the ceiling"),
-              interruptThread: () => Effect.die("interrupt must not dispatch above the ceiling"),
-            }),
-          ),
-          Layer.provide(ServerSettings.layerTest()),
-          Layer.provide(Layer.mock(ProviderRegistry.ProviderRegistry)({})),
-          Layer.provide(Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({})),
-          Layer.provide(Layer.mock(ScheduledTaskService.ScheduledTaskService)({})),
-          Layer.provide(Layer.mock(ProjectService.ProjectService)({})),
-          Layer.provide(Layer.mock(SecretRequests.SecretRequests)({})),
+                  deletedAt: null,
+                },
+                runs: [],
+              } as never),
+            stopWorkflow: () => Effect.die("workflow stop must not dispatch above the ceiling"),
+            interruptThread: () => Effect.die("interrupt must not dispatch above the ceiling"),
+          }),
         ),
+        Layer.provide(ServerSettings.layerTest()),
+        Layer.provide(Layer.mock(ProviderRegistry.ProviderRegistry)({})),
+        Layer.provide(Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({})),
+        Layer.provide(Layer.mock(ScheduledTaskService.ScheduledTaskService)({})),
+        Layer.provide(Layer.mock(ProjectService.ProjectService)({})),
+        Layer.provide(Layer.mock(SecretRequests.SecretRequests)({})),
       ),
     ),
+  ),
 );
 
 it.effect("discovers workflow stop targets and requires orchestration capability", () => {

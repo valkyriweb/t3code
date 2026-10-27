@@ -838,6 +838,7 @@ describe("OrchestratorMcpService", () => {
   const cancelOverRaisedGrandchild = (child: {
     readonly deleted: boolean;
     readonly raisedDuringStop?: boolean;
+    readonly operation?: "stop" | "cancel";
   }) =>
     Effect.gen(function* () {
       const parentThreadId = ThreadId.make("thread:mcp-cancel-grandchild-parent");
@@ -901,6 +902,7 @@ describe("OrchestratorMcpService", () => {
         NodeServices.layer,
         Layer.mock(ThreadManagementService.ThreadManagementService)({
           getThreadRecords: (threadId) => Effect.succeed(projections.get(threadId)!),
+          getProjectThreadRecords: ({ threadId }) => Effect.succeed(projections.get(threadId)!),
           getThreadShell: (threadId) =>
             Effect.succeed(
               threadId === grandchildThreadId && child.raisedDuringStop !== true
@@ -959,9 +961,29 @@ describe("OrchestratorMcpService", () => {
 
       return yield* Effect.gen(function* () {
         const service = yield* OrchestratorMcpService.OrchestratorMcpService;
-        const error = yield* service
-          .cancelTask(scope, { taskId, clientRequestId: "cancel-grandchild-above-modes" })
-          .pipe(Effect.flip);
+        const error = yield* (
+          child.operation === "stop"
+            ? service
+                .stopThread(
+                  {
+                    ...scope,
+                    thread: undefined,
+                    client: {
+                      sessionId: "external-stop",
+                      label: "External caller",
+                      access: "approval-required",
+                    },
+                  },
+                  { threadId: childThreadId, clientRequestId: "stop-grandchild-above-modes" },
+                )
+                .pipe(Effect.asVoid)
+            : service
+                .cancelTask(scope, {
+                  taskId,
+                  clientRequestId: "cancel-grandchild-above-modes",
+                })
+                .pipe(Effect.asVoid)
+        ).pipe(Effect.flip);
         return {
           code: error.code,
           dispatched: yield* Ref.get(dispatched),
@@ -996,6 +1018,30 @@ describe("OrchestratorMcpService", () => {
         stoppedBelow: false,
       });
     }),
+  );
+
+  it.effect("refuses a full thread stop before changing any thread above the client's modes", () =>
+    Effect.gen(function* () {
+      assert.deepEqual(yield* cancelOverRaisedGrandchild({ deleted: false, operation: "stop" }), {
+        code: "runtime_mode_escalation_denied",
+        dispatched: [],
+        stoppedBelow: false,
+      });
+    }),
+  );
+
+  it.effect(
+    "full thread stop reports a descendant raised above the client's modes during dispatch",
+    () =>
+      Effect.gen(function* () {
+        const outcome = yield* cancelOverRaisedGrandchild({
+          deleted: false,
+          operation: "stop",
+          raisedDuringStop: true,
+        });
+        assert.equal(outcome.code, "runtime_mode_escalation_denied");
+        assert.isFalse(outcome.stoppedBelow);
+      }),
   );
 });
 

@@ -21,6 +21,8 @@ export type T3McpToolSummaryAction =
   | "thread-send"
   | "thread-wait"
   | "thread-interrupt"
+  | "thread-stop"
+  | "thread-resume"
   | "workflow-stop"
   | "background-wait"
   | "thread-configuration"
@@ -162,6 +164,11 @@ const T3_MCP_TOOLS: Readonly<Record<string, T3McpToolDefinition>> = {
   t3_thread_interrupt: tool(
     ["Interrupt", "Interrupting", "Requested an interrupt of", "a T3 thread"],
     "thread-interrupt",
+  ),
+  t3_thread_stop: tool(["Stop", "Stopping", "Requested a stop for", "a T3 thread"], "thread-stop"),
+  t3_thread_resume: tool(
+    ["Resume", "Resuming", "Requested a resume for", "a T3 thread"],
+    "thread-resume",
   ),
   t3_worktree_handoff: tool(
     ["Hand off", "Handing off", "Handed off", "thread to a git worktree"],
