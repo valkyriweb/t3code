@@ -12105,6 +12105,18 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     };
   });
 
+  const assertCurrentDispatchModeLimit = Effect.fn(
+    "orchestrationV2.dispatch.assertCurrentModeLimit",
+  )(function* (command: OrchestrationV2ServerCommand) {
+    const limit = yield* DispatchModeLimit;
+    if (limit === undefined) return;
+    const threadId = commandThreadId(command);
+    const shell = yield* projectionStore
+      .getThreadShell(threadId)
+      .pipe(Effect.mapError((cause) => new OrchestratorProjectionError({ threadId, cause })));
+    if (shell !== null) yield* refuseAboveDispatchModeLimit(command, threadId, shell);
+  });
+
   const dispatchWithReceiptEffect = Effect.fn("orchestrationV2.dispatch.withReceipt")(function* (
     command: OrchestrationV2ServerCommand,
   ): Effect.fn.Return<OrchestratorV2DispatchResult, OrchestratorV2Error> {
@@ -12156,6 +12168,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ),
       );
       if (command.type === "queue.resume" || command.type === "queued-run.start") {
+        // Receipt replay can still start work; the user's modes may have changed.
+        yield* assertCurrentDispatchModeLimit(command);
         yield* mapDispatchError(command)(
           startNextQueuedRun(
             command.threadId,
@@ -12171,15 +12185,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     }
 
     // Recheck under the lock; the user may have raised modes since sender preflight.
-    const limit = yield* DispatchModeLimit;
-    if (limit !== undefined) {
-      // Fork and merge-back sources are unlocked; validate the modes copied by their dispatch.
-      const threadId = commandThreadId(command);
-      const shell = yield* projectionStore
-        .getThreadShell(threadId)
-        .pipe(Effect.mapError((cause) => new OrchestratorProjectionError({ threadId, cause })));
-      if (shell !== null) yield* refuseAboveDispatchModeLimit(command, threadId, shell);
-    }
+    yield* assertCurrentDispatchModeLimit(command);
 
     const plan = yield* dispatchOnce(command).pipe(
       Effect.filterOrFail(

@@ -509,6 +509,31 @@ export const OrchestratorMcpThreadInterruptResult = Schema.Struct({
 });
 export type OrchestratorMcpThreadInterruptResult = typeof OrchestratorMcpThreadInterruptResult.Type;
 
+export const OrchestratorMcpThreadStopInput = Schema.Struct({
+  threadId: ThreadId,
+  reason: Schema.optional(Schema.String.check(Schema.isMaxLength(2_000))),
+  clientRequestId: Schema.optional(OrchestratorMcpClientRequestId),
+});
+export type OrchestratorMcpThreadStopInput = typeof OrchestratorMcpThreadStopInput.Type;
+
+export const OrchestratorMcpThreadStopResult = Schema.Struct({
+  threadId: ThreadId,
+  status: Schema.Literal("stop_requested"),
+});
+export type OrchestratorMcpThreadStopResult = typeof OrchestratorMcpThreadStopResult.Type;
+
+export const OrchestratorMcpThreadResumeInput = Schema.Struct({
+  threadId: ThreadId,
+  clientRequestId: Schema.optional(OrchestratorMcpClientRequestId),
+});
+export type OrchestratorMcpThreadResumeInput = typeof OrchestratorMcpThreadResumeInput.Type;
+
+export const OrchestratorMcpThreadResumeResult = Schema.Struct({
+  threadId: ThreadId,
+  status: Schema.Literal("resume_requested"),
+});
+export type OrchestratorMcpThreadResumeResult = typeof OrchestratorMcpThreadResumeResult.Type;
+
 export const OrchestratorMcpCapabilitiesInput = Schema.Struct({
   search: Schema.optional(
     TrimmedNonEmptyString.check(Schema.isMaxLength(200)).annotate({

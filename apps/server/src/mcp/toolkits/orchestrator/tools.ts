@@ -20,6 +20,10 @@ import {
   OrchestratorMcpTaskStatusInput,
   OrchestratorMcpThreadInterruptInput,
   OrchestratorMcpThreadInterruptResult,
+  OrchestratorMcpThreadStopInput,
+  OrchestratorMcpThreadStopResult,
+  OrchestratorMcpThreadResumeInput,
+  OrchestratorMcpThreadResumeResult,
   OrchestratorMcpThreadListInput,
   OrchestratorMcpThreadListResult,
   OrchestratorMcpThreadReadInput,
@@ -280,6 +284,31 @@ const ThreadInterruptTool = Tool.make("t3_thread_interrupt", {
   .annotate(Tool.Title, "Interrupt a T3 thread")
   .annotate(Tool.Destructive, true);
 
+const ThreadStopTool = Tool.make("t3_thread_stop", {
+  description:
+    "Stop a thread as in the UI: interrupt its work, hold its queued turns, and stop its delegated tasks. The thread and all its delegates must be within your modes. Use t3_thread_resume to release held turns. Reuse clientRequestId when retrying the same stop. Returns acceptance; read the thread for completion.",
+  parameters: OrchestratorMcpThreadStopInput,
+  success: OrchestratorMcpThreadStopResult,
+  failure: OrchestratorMcpFailure,
+  failureMode: "return",
+  dependencies,
+})
+  .annotate(Tool.Title, "Stop a T3 thread")
+  .annotate(Tool.Destructive, true);
+
+const ThreadResumeTool = Tool.make("t3_thread_resume", {
+  description:
+    "Resume a thread's held queue as in the UI, without adding a message. Does not resume its delegated threads. With no queued turns, starts no work. The target must be within your modes. Reuse clientRequestId when retrying the same resume. Returns acceptance; read the thread for progress.",
+  parameters: OrchestratorMcpThreadResumeInput,
+  success: OrchestratorMcpThreadResumeResult,
+  failure: OrchestratorMcpFailure,
+  failureMode: "return",
+  dependencies,
+})
+  .annotate(Tool.Title, "Resume a T3 thread")
+  .annotate(Tool.Destructive, true)
+  .annotate(Tool.OpenWorld, true);
+
 export const OrchestratorToolkit = Toolkit.make(
   OrchestratorCapabilitiesTool,
   DelegateTaskTool,
@@ -298,4 +327,6 @@ export const OrchestratorToolkit = Toolkit.make(
   ThreadSendTool,
   ThreadWaitTool,
   ThreadInterruptTool,
+  ThreadStopTool,
+  ThreadResumeTool,
 );
