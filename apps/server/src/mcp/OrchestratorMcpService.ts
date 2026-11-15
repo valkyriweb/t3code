@@ -893,6 +893,7 @@ function listItemFromShell(
     ...threadPullRequests(shell.pullRequests),
     ...threadSettlement(shell),
     ...threadSnooze(shell, nowMs),
+    pinnedAt: shell.pinnedAt == null ? null : DateTime.formatIso(shell.pinnedAt),
     ...threadBackgroundWork(shell),
     parentThreadId: shell.lineage.parentThreadId,
     relationshipToParent: shell.lineage.relationshipToParent,
@@ -3151,7 +3152,7 @@ const make = Effect.gen(function* () {
       const limit = input.limit ?? DEFAULT_THREAD_LIST_LIMIT;
       let page: ReadonlyArray<OrchestrationV2ThreadShell>;
       let total: number;
-      if (statuses === null && input.snoozed === undefined) {
+      if (statuses === null && input.snoozed === undefined && input.pinned === undefined) {
         total = candidates.length;
         page = yield* shellsOf(candidates.slice(cursor, cursor + limit));
       } else {
@@ -3160,6 +3161,9 @@ const make = Effect.gen(function* () {
           .filter((thread) => statuses === null || statuses.has(listedThreadStatus(thread)))
           .filter(
             (thread) => input.snoozed === undefined || isSnoozed(thread, nowMs) === input.snoozed,
+          )
+          .filter(
+            (thread) => input.pinned === undefined || (thread.pinnedAt != null) === input.pinned,
           );
         total = filtered.length;
         page = filtered.slice(cursor, cursor + limit);
