@@ -23,6 +23,7 @@ import {
   type OrchestrationV2ThreadShell,
 } from "@t3tools/contracts";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
+import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as TestClock from "effect/testing/TestClock";
@@ -1294,32 +1295,79 @@ it.effect("only the caller that prepared a pending upload can discard it", () =>
 );
 
 it.effect(
-  "t3_thread_list settled:false with an empty statuses list lists the unsettled threads",
+  "t3_thread_list filters pinned and unsettled threads before pagination with empty statuses",
   () => {
     const unsettled = McpToolAccessTestkit.liveThreadShell(ThreadId.make("unsettled-thread"));
     const settled = {
       ...McpToolAccessTestkit.liveThreadShell(ThreadId.make("settled-thread")),
       settledOverride: "settled",
     } as const;
+    const pinnedAt = "2026-10-18T00:00:00.000Z";
+    const pinned = {
+      ...McpToolAccessTestkit.liveThreadShell(ThreadId.make("pinned-thread")),
+      pinnedAt: DateTime.makeUnsafe(pinnedAt),
+    };
+    const unpinned = {
+      ...McpToolAccessTestkit.liveThreadShell(ThreadId.make("unpinned-thread")),
+      pinnedAt: null,
+    };
+    const threads = [unsettled, settled, pinned, unpinned];
     return Effect.gen(function* () {
       const server = yield* McpServer.McpServer;
-      const result = yield* server
-        .callTool({
-          name: "t3_thread_list",
-          arguments: { projectId: unsettled.projectId, settled: false, statuses: [] },
-        })
-        .pipe(
-          Effect.provideService(
-            McpInvocationContext.McpInvocationContext,
-            clientScope("full-access"),
-          ),
-          Effect.provideService(McpSchema.McpServerClient, client),
-        );
-      expect(result.isError).toBe(false);
-      expect(result.structuredContent).toMatchObject({
-        threads: [{ threadId: unsettled.id, settled: false }],
-        total: 1,
-      });
+      for (const testCase of [
+        {
+          input: {},
+          expectedThreads: [
+            { threadId: unsettled.id, pinnedAt: null },
+            { threadId: pinned.id, pinnedAt },
+            { threadId: unpinned.id, pinnedAt: null },
+          ],
+          total: 3,
+          nextCursor: null,
+        },
+        {
+          input: { pinned: true, limit: 1 },
+          expectedThreads: [{ threadId: pinned.id, pinnedAt }],
+          total: 1,
+          nextCursor: null,
+        },
+        {
+          input: { pinned: false, limit: 1 },
+          expectedThreads: [{ threadId: unsettled.id, pinnedAt: null }],
+          total: 2,
+          nextCursor: 1,
+        },
+        {
+          input: { pinned: false, limit: 1, cursor: 1 },
+          expectedThreads: [{ threadId: unpinned.id, pinnedAt: null }],
+          total: 2,
+          nextCursor: null,
+        },
+      ]) {
+        const result = yield* server
+          .callTool({
+            name: "t3_thread_list",
+            arguments: {
+              projectId: unsettled.projectId,
+              settled: false,
+              statuses: [],
+              ...testCase.input,
+            },
+          })
+          .pipe(
+            Effect.provideService(
+              McpInvocationContext.McpInvocationContext,
+              clientScope("full-access"),
+            ),
+            Effect.provideService(McpSchema.McpServerClient, client),
+          );
+        expect(result.isError).toBe(false);
+        expect(result.structuredContent).toMatchObject({
+          threads: testCase.expectedThreads.map((thread) => ({ ...thread, settled: false })),
+          total: testCase.total,
+          nextCursor: testCase.nextCursor,
+        });
+      }
     }).pipe(
       Effect.provide(
         layerOrchestratorToolkit.pipe(
@@ -1327,8 +1375,8 @@ it.effect(
           Layer.provide(NodeCrypto.layer),
           Layer.provide(
             Layer.mock(ThreadManagement.ThreadManagementService)({
-              listProjectThreads: () => Effect.succeed([unsettled, settled]),
-              getShellSnapshot: () => Effect.succeed({ threads: [unsettled, settled] } as never),
+              listProjectThreads: () => Effect.succeed(threads),
+              getShellSnapshot: () => Effect.succeed({ threads } as never),
             }),
           ),
           Layer.provide(ServerSettings.layerTest()),
