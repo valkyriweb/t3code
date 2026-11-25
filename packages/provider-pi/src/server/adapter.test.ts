@@ -5540,6 +5540,70 @@ describe("PiAdapterV2", () => {
       }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
+  it.effect.each([
+    { answer: ["Blue", "Red"], expected: { selections: ["Blue", "Red"], other: "" } },
+    { answer: "Purple", expected: { selections: [], other: "Purple" } },
+  ])(
+    "routes an async ask through native user input after Pi settles: $answer",
+    ({ answer, expected }) =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakePi;
+        const { runtime, takeEvent } = yield* openRuntime(fake);
+        const providerThread = yield* runtime.ensureThread({
+          threadId: THREAD_ID,
+          modelSelection: modelSelection("default"),
+          runtimePolicy,
+        });
+        yield* startTurn(runtime, providerThread);
+        yield* fake.takeRequest("prompt");
+        const options = [
+          { label: "Blue", description: "Cool" },
+          { label: "Red", description: "Warm" },
+        ];
+        yield* fake.emit({
+          type: "extension_ui_request",
+          id: "rpc-request",
+          method: "editor",
+          title: "my-pi.async-ask/v1",
+          prefill: JSON.stringify({
+            id: "question-id",
+            header: "Colors",
+            question: "Which colors?",
+            options,
+            multiSelect: true,
+          }),
+        });
+        const event = yield* takeEvent(
+          (event) =>
+            event.type === "turn_item.updated" && event.turnItem.type === "user_input_request",
+        );
+        if (event.type !== "turn_item.updated" || event.turnItem.type !== "user_input_request") {
+          return assert.fail("expected a native user input request");
+        }
+        assert.isNull(event.turnItem.providerTurnId);
+        assert.deepEqual(event.turnItem.questions, [
+          {
+            id: "question-id",
+            header: "Colors",
+            question: "Which colors?",
+            options: options.map((option) => ({ ...option, value: option.label })),
+            multiSelect: true,
+            allowCustomAnswer: true,
+            required: true,
+          },
+        ]);
+        yield* fake.emit({ type: "agent_settled" });
+        yield* takeEvent((event) => event.type === "turn.terminal");
+        yield* runtime.respondToRuntimeRequest({
+          requestId: event.turnItem.requestId,
+          answers: { "question-id": answer },
+        });
+        const response = yield* fake.takeRequest("extension_ui_response");
+        assert.equal(response["id"], "rpc-request");
+        assert.deepEqual(JSON.parse(String(response["value"])), expected);
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
   it.effect("keeps the complete editor prefill editable and returns exact edited text", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakePi;
