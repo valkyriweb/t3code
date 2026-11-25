@@ -81,6 +81,7 @@ import {
 } from "./mcpInjection.ts";
 import { PI_FILE_CHANGE_TOOLS, PI_T3_SERVICE_TIER_COMMAND } from "./mcpExtensionSource.ts";
 import { PI_STANDARD_SERVICE_TIER } from "./modelCapabilities.ts";
+import { PI_ASYNC_ASK_TITLE, piAsyncAskAnswer, piAsyncAskQuestion } from "./asyncAsk.ts";
 
 export const PI_PROVIDER = ProviderDriverKind.make("pi");
 const PI_DRIVER_KIND = PI_PROVIDER;
@@ -418,6 +419,7 @@ interface PendingPiPrompt {
   readonly node: OrchestrationV2ExecutionNode;
   readonly turnItem: OrchestrationV2TurnItem;
   readonly customAnswerRoute: PiCustomAnswerRoute | undefined;
+  readonly asyncQuestion: OrchestrationV2UserInputQuestion | undefined;
 }
 
 /**
@@ -545,7 +547,11 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           const launch = buildPiRpcLaunch({
             launchArgs: resolvedLaunchArgs.args,
             // PortScanner.AGENT_THREAD_ENV, as a literal because this package cannot reach apps/server.
-            environment: { ...options.environment, T3CODE_THREAD_ID: input.threadId },
+            environment: {
+              ...options.environment,
+              T3CODE_THREAD_ID: input.threadId,
+              T3CODE_PI_ASYNC_ASK: "1",
+            },
             mcpSession,
             extensionPath,
             sessionPath,
@@ -1759,13 +1765,14 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
 
       const cancelPendingPrompts = Effect.fn("PiAdapter.cancelPendingPrompts")(function* (
         resolvedAt: DateTime.Utc,
+        preserveAsync = false,
       ) {
-        const pending = Array.from(pendingPrompts.values());
-        pendingPrompts.clear();
         customAnswerFollowUps.clear();
-        yield* Effect.forEach(pending, (prompt) => cancelPrompt(prompt, resolvedAt), {
-          discard: true,
-        });
+        for (const [id, prompt] of pendingPrompts) {
+          if (preserveAsync && prompt.asyncQuestion !== undefined) continue;
+          pendingPrompts.delete(id);
+          yield* cancelPrompt(prompt, resolvedAt);
+        }
       });
 
       const emitSystemNotice = Effect.fnUntraced(function* (
@@ -1883,8 +1890,22 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           });
           return;
         }
+        const title = recordString(event, "title") ?? method;
+        const asyncQuestion =
+          method === "editor" && title === PI_ASYNC_ASK_TITLE
+            ? piAsyncAskQuestion(event)
+            : undefined;
+        if (asyncQuestion === null) {
+          yield* connection.send({
+            type: "extension_ui_response",
+            id: nativeRequestId,
+            cancelled: true,
+          });
+          return;
+        }
         const state = threadState;
-        const turn = state?.activeTurn ?? null;
+        // Async asks remain open after the originating turn finishes.
+        const turn = asyncQuestion === undefined ? (state?.activeTurn ?? null) : null;
         const createdAt = yield* DateTime.now;
         const timeout = recordNumber(event, "timeout");
         // Pi treats zero as no timeout and negative durations as immediate expiry.
@@ -1898,7 +1919,6 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           nativeRequestId,
         });
         const nodeId = idAllocator.derive.approvalNode({ requestId });
-        const title = recordString(event, "title") ?? method;
         const threadId =
           turn?.turnInput.threadId ?? state?.providerThread.appThreadId ?? input.threadId;
         const providerThreadId = state?.providerThread.id ?? null;
@@ -1942,7 +1962,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           parentItemId: null,
           ordinal: turn === null ? 0 : itemOrdinal(turn, nativeRequestId),
           status: "waiting" as const,
-          title,
+          title: asyncQuestion?.header ?? title,
           startedAt: createdAt,
           completedAt: null,
           updatedAt: createdAt,
@@ -1964,12 +1984,16 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
                 ...itemBase,
                 type: "user_input_request",
                 requestId,
-                questions: [askUser?.question ?? piQuestion(nativeRequestId, method, title, event)],
+                questions: [
+                  asyncQuestion ??
+                    askUser?.question ??
+                    piQuestion(nativeRequestId, method, title, event),
+                ],
               };
         const pending: PendingPiPrompt = {
           nativeRequestId,
           method,
-          questionId: nativeRequestId,
+          questionId: asyncQuestion?.id ?? nativeRequestId,
           approvalKey,
           expiresAt,
           expirationFiber: null,
@@ -1977,6 +2001,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           node,
           turnItem,
           customAnswerRoute: askUser?.customAnswerRoute,
+          asyncQuestion,
         };
         pendingPrompts.set(String(requestId), pending);
         yield* emit({
@@ -2110,7 +2135,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
             turn.activeProviderRetry = null;
           }
         }
-        yield* cancelPendingPrompts(completedAt);
+        yield* cancelPendingPrompts(completedAt, !closed);
         // Stop clears Pi's queue, so an unread steer was dropped; otherwise Pi read it before settling.
         for (const messageId of turn.unreadSteers.splice(0)) {
           yield* emitSteerStatus(turn, messageId, interrupted ? "cancelled" : "completed");
@@ -3787,6 +3812,22 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
               );
             }
             let response = piUiResponse(pending, requestInput.decision, requestInput.answers);
+            if (pending.asyncQuestion !== undefined) {
+              if (requestInput.decision === "cancel" || requestInput.decision === "decline") {
+                pendingPrompts.delete(String(requestInput.requestId));
+                yield* cancelPrompt(pending, answeredAt);
+                return;
+              }
+              const value = piAsyncAskAnswer(
+                pending.asyncQuestion,
+                requestInput.answers?.[pending.questionId],
+              );
+              if (value === undefined)
+                return yield* protocolError(
+                  "Choose a Pi async question option or enter a custom answer",
+                );
+              response = { value };
+            }
             const route = pending.customAnswerRoute;
             if (
               route !== undefined &&
