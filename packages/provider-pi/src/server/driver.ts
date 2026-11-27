@@ -174,6 +174,7 @@ export const PiDriver: ProviderDriver<PiSettings, PiDriverEnv, Path.Path> = {
               snapshot: currentSnapshot,
               maintenanceCapabilities,
               enableProviderUpdateChecks: settings.enableProviderUpdateChecks,
+              environment: processEnv,
               publishSnapshot,
             }),
           ),

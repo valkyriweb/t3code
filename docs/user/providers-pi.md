@@ -10,6 +10,7 @@ Run your existing [Pi](https://pi.dev) (**0.84.3+**, Node.js **22.19+**) install
 
 - In **Launch arguments**, `--provider` must be paired with `--model`. Flags that alter Pi's execution mode or session selection are rejected because T3 Code manages them.
 - Update installer-managed Pi with `pi update`, or via your package manager (e.g. `nix profile upgrade pi`).
+- Running a Pi fork or custom build? Set `PI_SKIP_VERSION_CHECK=1` in the instance's **Environment variables** so T3 Code stops comparing it with the published Pi release and offering an update.
 
 ## Features and extensions
 

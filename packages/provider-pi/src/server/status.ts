@@ -663,6 +663,7 @@ export const enrichPiSnapshot = (input: {
   readonly snapshot: ServerProvider;
   readonly maintenanceCapabilities: ProviderMaintenanceCapabilities;
   readonly enableProviderUpdateChecks?: boolean;
+  readonly environment: NodeJS.ProcessEnv;
   readonly publishSnapshot: (snapshot: ServerProvider) => Effect.Effect<void>;
 }): Effect.Effect<
   void,
@@ -671,7 +672,11 @@ export const enrichPiSnapshot = (input: {
 > => {
   const { snapshot, publishSnapshot } = input;
   return enrichProviderSnapshotWithVersionAdvisory(snapshot, input.maintenanceCapabilities, {
-    enableProviderUpdateChecks: input.enableProviderUpdateChecks,
+    // Pi's own opt-out. A fork or custom build does not follow the published release's versions,
+    // and its `update --self` cannot install that release.
+    enableProviderUpdateChecks: input.environment.PI_SKIP_VERSION_CHECK
+      ? false
+      : input.enableProviderUpdateChecks,
   }).pipe(
     Effect.flatMap((enrichedSnapshot) => publishSnapshot(enrichedSnapshot)),
     Effect.catchCause((cause) =>
