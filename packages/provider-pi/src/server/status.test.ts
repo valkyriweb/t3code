@@ -1,18 +1,23 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
+import { ProviderDriverKind, ProviderInstanceId, type ServerProvider } from "@t3tools/contracts";
+import { makeProviderMaintenanceCapabilities } from "@t3tools/provider-core/server/maintenanceResolver";
+import * as ProviderLatestVersions from "@t3tools/provider-core/server/ProviderLatestVersions";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
+import * as Layer from "effect/Layer";
 import * as TestClock from "effect/testing/TestClock";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
+import * as HttpClient from "effect/http/HttpClient";
 import * as ChildProcess from "effect/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
-import { checkPiProviderStatus } from "./status.ts";
+import { checkPiProviderStatus, enrichPiSnapshot } from "./status.ts";
 
 const encoder = new TextEncoder();
 const decodeRpcRequest = Schema.decodeSync(
@@ -508,5 +513,53 @@ describe("PiProvider", () => {
       assert.equal(snapshot.status, "ready");
       assert.equal(snapshot.auth.status, "unknown");
     }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  // regression: a Pi fork kept offering an update to the published release, which its updater cannot install
+  it.effect.each([
+    { environment: {}, status: "behind_latest", latestVersion: "1.6.1" },
+    { environment: { PI_SKIP_VERSION_CHECK: "1" }, status: "unknown", latestVersion: null },
+  ] as const)(
+    "reports $status for an older Pi when its environment is $environment",
+    ({ environment, status, latestVersion }) =>
+      Effect.gen(function* () {
+        const driver = ProviderDriverKind.make("pi");
+        const draft = yield* checkPiProviderStatus(settings).pipe(
+          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, piProbeSpawner("1.5.2")),
+        );
+        const published: Array<ServerProvider> = [];
+        yield* enrichPiSnapshot({
+          snapshot: { ...draft, instanceId: ProviderInstanceId.make("pi"), driver },
+          maintenanceCapabilities: makeProviderMaintenanceCapabilities({
+            provider: driver,
+            packageName: "@earendil-works/pi-coding-agent",
+            updateExecutable: "/opt/fork/pi",
+            updateArgs: ["update", "--self"],
+            updateLockKey: "pi-native",
+            latestVersion: "1.6.1",
+          }),
+          environment,
+          publishSnapshot: (snapshot) => Effect.sync(() => void published.push(snapshot)),
+        });
+        assert.deepEqual(
+          published.map((snapshot) => [
+            snapshot.versionAdvisory?.currentVersion,
+            snapshot.versionAdvisory?.status,
+            snapshot.versionAdvisory?.latestVersion,
+          ]),
+          [["1.5.2", status, latestVersion]],
+        );
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            NodeServices.layer,
+            ProviderLatestVersions.layer,
+            Layer.succeed(
+              HttpClient.HttpClient,
+              HttpClient.make(() => Effect.die("Unexpected HTTP")),
+            ),
+          ),
+        ),
+      ),
   );
 });
